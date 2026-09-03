@@ -131,6 +131,19 @@
     let activeGameTurn = 0;
     let isMyTurn = false;
 
+    // Blind Chain Relay State
+    let blindChainActive = false;
+    let mySlice = null;        // { start: 0.0, end: 0.33 }
+    let blindChainSlices = {};  // client_id -> { start, end }
+    let blindChainTimer = 0;
+    let blindChainPlayers = [];
+    const SEAM_PX = 20;
+
+    // Blind Chain Relay DOM Elements
+    const blindChainFogOverlay = document.getElementById('blindChainFogOverlay');
+    const blindChainTimerHud = document.getElementById('blindChainTimerHud');
+    const blindChainTimerDisplay = document.getElementById('blindChainTimerDisplay');
+
     // DOM Element References for Chat Sidebar
     const chatToggleBtn = document.getElementById('chatToggleBtn');
     const closeChatBtn = document.getElementById('closeChatBtn');
@@ -494,6 +507,65 @@
             });
         }
 
+        // Blind Chain: draw fog overlay on canvas for zones outside player's slice
+        if (blindChainActive && mySlice) {
+            const seamNorm = SEAM_PX / height;
+            const sliceTopPx = mySlice.start * height;
+            const sliceBottomPx = mySlice.end * height;
+            const seamPx = SEAM_PX;
+
+            ctx.save();
+            ctx.fillStyle = 'rgba(9, 13, 22, 0.82)';
+
+            // Top fog band (above player's slice - seam)
+            const fogTopEnd = Math.max(0, sliceTopPx - seamPx);
+            if (fogTopEnd > 0) {
+                ctx.fillRect(0, 0, width, fogTopEnd);
+            }
+
+            // Bottom fog band (below player's slice + seam)
+            const fogBottomStart = Math.min(height, sliceBottomPx + seamPx);
+            if (fogBottomStart < height) {
+                ctx.fillRect(0, fogBottomStart, width, height - fogBottomStart);
+            }
+
+            // Draw seam gradient at boundaries for soft transition
+            if (fogTopEnd > 0) {
+                const seamGrad = ctx.createLinearGradient(0, fogTopEnd, 0, fogTopEnd + seamPx);
+                seamGrad.addColorStop(0, 'rgba(9, 13, 22, 0.5)');
+                seamGrad.addColorStop(1, 'rgba(9, 13, 22, 0)');
+                ctx.fillStyle = seamGrad;
+                ctx.fillRect(0, fogTopEnd, width, seamPx);
+            }
+            if (fogBottomStart < height) {
+                const seamGrad = ctx.createLinearGradient(0, fogBottomStart - seamPx, 0, fogBottomStart);
+                seamGrad.addColorStop(0, 'rgba(9, 13, 22, 0)');
+                seamGrad.addColorStop(1, 'rgba(9, 13, 22, 0.5)');
+                ctx.fillStyle = seamGrad;
+                ctx.fillRect(0, fogBottomStart - seamPx, width, seamPx);
+            }
+
+            // Draw dashed slice boundary lines
+            ctx.strokeStyle = 'rgba(99, 102, 241, 0.5)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([8, 8]);
+
+            if (sliceTopPx > 0) {
+                ctx.beginPath();
+                ctx.moveTo(0, sliceTopPx);
+                ctx.lineTo(width, sliceTopPx);
+                ctx.stroke();
+            }
+            if (sliceBottomPx < height) {
+                ctx.beginPath();
+                ctx.moveTo(0, sliceBottomPx);
+                ctx.lineTo(width, sliceBottomPx);
+                ctx.stroke();
+            }
+            ctx.setLineDash([]);
+            ctx.restore();
+        }
+
         ctx.restore();
     }
 
@@ -765,6 +837,15 @@
             return;
         }
 
+        // Blind Chain: block drawing outside assigned zone
+        if (blindChainActive && mySlice) {
+            const coords = getCanvasCoordinates(e);
+            const seamNorm = SEAM_PX / canvas.getBoundingClientRect().height;
+            if (coords.y < mySlice.start - seamNorm || coords.y > mySlice.end + seamNorm) {
+                return; // Outside allowed zone
+            }
+        }
+
         const coords = getCanvasCoordinates(e);
 
         if (currentTool === 'sticky') {
@@ -793,6 +874,12 @@
         sendCursorPosition(coords.x, coords.y);
 
         if (!isDrawing) return;
+
+        // Blind Chain: clamp Y to allowed zone
+        if (blindChainActive && mySlice) {
+            const seamNorm = SEAM_PX / canvas.getBoundingClientRect().height;
+            coords.y = Math.max(mySlice.start - seamNorm, Math.min(mySlice.end + seamNorm, coords.y));
+        }
 
         if (currentTool === 'pen' || currentTool === 'eraser') {
             currentPoints.push({ x: coords.x, y: coords.y });
@@ -1597,7 +1684,169 @@
                 canvasHistory = msg.history || [];
                 redrawFullCanvas();
                 break;
+
+            // ============================================================
+            // Blind Chain Relay Events
+            // ============================================================
+            case 'blind_chain_start':
+                blindChainActive = true;
+                blindChainSlices = msg.slices || {};
+                blindChainPlayers = msg.players || [];
+                mySlice = blindChainSlices[clientId] || null;
+                blindChainTimer = msg.timer_seconds || 60;
+                gameStatus = 'blind_chain_playing';
+                canvasHistory = []; // Fresh canvas for blind chain round
+
+                // Hide lobby
+                hideAllModals();
+
+                // Show timer HUD
+                if (blindChainTimerHud) {
+                    blindChainTimerHud.style.display = 'flex';
+                }
+                if (blindChainTimerDisplay) {
+                    const mins = Math.floor(blindChainTimer / 60);
+                    const secs = blindChainTimer % 60;
+                    blindChainTimerDisplay.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+                    blindChainTimerDisplay.className = 'bc-timer-countdown';
+                }
+
+                // Build fog overlay DOM elements for other players' zones
+                buildBlindChainFogOverlay();
+
+                redrawFullCanvas();
+                showToast(`🎨 Blind Chain Relay started! Draw in your zone (${Math.round((mySlice.end - mySlice.start) * 100)}% of canvas)`);
+                break;
+
+            case 'blind_chain_tick':
+                blindChainTimer = msg.time_left;
+                if (blindChainTimerDisplay) {
+                    const mins = Math.floor(msg.time_left / 60);
+                    const secs = msg.time_left % 60;
+                    blindChainTimerDisplay.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+                    // Visual urgency states
+                    if (msg.time_left <= 5) {
+                        blindChainTimerDisplay.className = 'bc-timer-countdown critical';
+                    } else if (msg.time_left <= 15) {
+                        blindChainTimerDisplay.className = 'bc-timer-countdown warning';
+                    } else {
+                        blindChainTimerDisplay.className = 'bc-timer-countdown';
+                    }
+                }
+                break;
+
+            case 'blind_chain_reveal':
+                gameStatus = 'blind_chain_reveal';
+                blindChainActive = false;
+
+                // Load all strokes from the reveal payload
+                const allRevealStrokes = msg.all_strokes || [];
+                canvasHistory = allRevealStrokes;
+
+                // Animate fog lift
+                playBlindChainReveal();
+
+                // Hide timer HUD after delay
+                setTimeout(() => {
+                    if (blindChainTimerHud) blindChainTimerHud.style.display = 'none';
+                }, 2000);
+
+                showToast('🎉 Blind Chain Reveal! See the masterpiece!');
+                break;
         }
+    }
+
+    // ==========================================================================
+    // Blind Chain Relay — Fog Overlay & Reveal Functions
+    // ==========================================================================
+    function buildBlindChainFogOverlay() {
+        if (!blindChainFogOverlay) return;
+        blindChainFogOverlay.innerHTML = '';
+        blindChainFogOverlay.style.display = 'block';
+        blindChainFogOverlay.classList.remove('revealing');
+
+        if (!mySlice) return;
+
+        const viewportRect = canvas.getBoundingClientRect();
+        const canvasH = viewportRect.height;
+        const sliceTopPx = mySlice.start * canvasH;
+        const sliceBottomPx = mySlice.end * canvasH;
+
+        // Top fog band
+        if (sliceTopPx > SEAM_PX) {
+            const topBand = document.createElement('div');
+            topBand.className = 'blind-chain-fog-band';
+            topBand.style.top = '0';
+            topBand.style.height = (sliceTopPx - SEAM_PX) + 'px';
+            blindChainFogOverlay.appendChild(topBand);
+        }
+
+        // Bottom fog band
+        if (sliceBottomPx + SEAM_PX < canvasH) {
+            const bottomBand = document.createElement('div');
+            bottomBand.className = 'blind-chain-fog-band';
+            bottomBand.style.top = (sliceBottomPx + SEAM_PX) + 'px';
+            bottomBand.style.height = (canvasH - sliceBottomPx - SEAM_PX) + 'px';
+            blindChainFogOverlay.appendChild(bottomBand);
+        }
+
+        // Dashed seam lines at slice boundaries
+        if (sliceTopPx > 0) {
+            const seamLine = document.createElement('div');
+            seamLine.className = 'blind-chain-seam-line';
+            seamLine.style.top = sliceTopPx + 'px';
+            blindChainFogOverlay.appendChild(seamLine);
+        }
+        if (sliceBottomPx < canvasH) {
+            const seamLine = document.createElement('div');
+            seamLine.className = 'blind-chain-seam-line';
+            seamLine.style.top = sliceBottomPx + 'px';
+            blindChainFogOverlay.appendChild(seamLine);
+        }
+
+        // "Your Zone" label centered in the player's slice
+        const zoneLabel = document.createElement('div');
+        zoneLabel.className = 'blind-chain-zone-label';
+        zoneLabel.textContent = '✦ YOUR ZONE ✦';
+        zoneLabel.style.top = (sliceTopPx + (sliceBottomPx - sliceTopPx) / 2 - 12) + 'px';
+        blindChainFogOverlay.appendChild(zoneLabel);
+    }
+
+    function playBlindChainReveal() {
+        // Step 1: Animate fog bands lifting
+        if (blindChainFogOverlay) {
+            const bands = blindChainFogOverlay.querySelectorAll('.blind-chain-fog-band');
+            bands.forEach((band, idx) => {
+                setTimeout(() => {
+                    band.classList.add(idx === 0 ? 'revealing-up' : 'revealing-down');
+                }, idx * 200);
+            });
+
+            // Fade out the entire overlay
+            setTimeout(() => {
+                blindChainFogOverlay.classList.add('revealing');
+            }, 300);
+
+            // Clean up after animation
+            setTimeout(() => {
+                blindChainFogOverlay.innerHTML = '';
+                blindChainFogOverlay.style.display = 'none';
+                blindChainFogOverlay.classList.remove('revealing');
+            }, 2000);
+        }
+
+        // Step 2: Redraw the full canvas with all strokes (no fog)
+        setTimeout(() => {
+            redrawFullCanvas();
+        }, 400);
+
+        // Step 3: Fire confetti celebration
+        setTimeout(() => {
+            if (typeof runConfettiAnimation === 'function') {
+                runConfettiAnimation();
+            }
+        }, 800);
     }
 
     // ==========================================================================
@@ -2966,7 +3215,8 @@
                 roomModePillSelector.querySelectorAll('.pill-option').forEach(p => p.classList.remove('active'));
                 pill.classList.add('active');
                 selectedSessionMode = pill.dataset.mode || 'whiteboard';
-                showToast(`Session Mode set to: ${selectedSessionMode === 'game' ? 'Party Game' : 'Collaborative Canvas'}`);
+                const modeLabels = { whiteboard: 'Collaborative Canvas', game: 'Party Game', blind_chain: 'Blind Chain Relay' };
+                showToast(`Session Mode set to: ${modeLabels[selectedSessionMode] || selectedSessionMode}`);
             });
         });
     }
@@ -2981,6 +3231,15 @@
             if (selectedSessionMode === 'game') {
                 showToast('🚀 Launching Party Game...');
                 sendWebSocketMessage({ type: 'start_game' });
+            } else if (selectedSessionMode === 'blind_chain') {
+                showToast('🚀 Launching Blind Chain Relay...');
+                const canvasRect = canvas.getBoundingClientRect();
+                sendWebSocketMessage({
+                    type: 'start_session',
+                    mode: 'blind_chain',
+                    timer_seconds: 60,
+                    canvas_height_px: Math.round(canvasRect.height)
+                });
             } else {
                 showToast('🚀 Launching Collaborative Whiteboard Canvas...');
                 sendWebSocketMessage({

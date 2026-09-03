@@ -79,6 +79,17 @@
         <main class="canvas-viewport">
             <canvas id="whiteboardCanvas"></canvas>
 
+            <!-- Blind Chain Relay Fog Overlay (pointer-events: none) -->
+            <div id="blindChainFogOverlay" class="blind-chain-fog-overlay" style="display: none;"></div>
+
+            <!-- Blind Chain Timer HUD -->
+            <div id="blindChainTimerHud" class="blind-chain-timer-hud" style="display: none;">
+                <span class="bc-hud-label">🎨 Blind Chain Relay</span>
+                <span class="bc-hud-separator">—</span>
+                <span class="bc-hud-hint">Draw in your zone!</span>
+                <span id="blindChainTimerDisplay" class="bc-timer-countdown">01:00</span>
+            </div>
+
             <!-- Game HUD Bar Overlay -->
             <div id="gameHudBar" class="game-hud-bar hidden">
                 <div class="hud-item prompt-banner">
@@ -583,6 +594,7 @@
                         <div class="setting-pill-selector" id="roomModePillSelector">
                             <button type="button" class="pill-option active" data-mode="whiteboard">Collaborative Canvas</button>
                             <button type="button" class="pill-option" data-mode="game">Party Game</button>
+                            <button type="button" class="pill-option" data-mode="blind_chain">Blind Chain</button>
                         </div>
                     </div>
                 </div>

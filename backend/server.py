@@ -11,6 +11,8 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from backend.room_manager import RoomManager
+from backend.game_modes.blind_chain import BlindChainGame
 
 
 try:
@@ -196,7 +198,7 @@ class ConnectionManager:
                                     if room_id not in self.cluster_user_rosters:
                                         self.cluster_user_rosters[room_id] = {}
                                     self.cluster_user_rosters[room_id][u_info["client_id"]] = u_info
-                            elif data.get("type") in ["turn_start", "game_reveal", "voting_start", "voting_results", "sync_game_session"] or "game_session" in data:
+                            elif data.get("type") in ["turn_start", "game_reveal", "voting_start", "voting_results", "sync_game_session", "blind_chain_start", "blind_chain_reveal"] or "game_session" in data:
                                 session_data = data.get("game_session")
                                 if session_data and isinstance(session_data, dict) and room_id:
                                     clean_data = {k: v for k, v in session_data.items() if k != "timer_task"}
@@ -204,9 +206,15 @@ class ConnectionManager:
                                         clean_data["timer_task"] = self.game_sessions[room_id]["timer_task"]
                                     self.game_sessions[room_id] = clean_data
 
-                        await self.broadcast_local(
-                            room_id, data, exclude_client_id=exclude_client_id
-                        )
+                        # For blind_chain draw events on remote nodes, use filtered broadcast
+                        if data and isinstance(data, dict) and data.get("type") == "draw" and data.get("_blind_chain_filtered"):
+                            await self.broadcast_local_filtered(
+                                room_id, data, exclude_client_id=exclude_client_id
+                            )
+                        else:
+                            await self.broadcast_local(
+                                room_id, data, exclude_client_id=exclude_client_id
+                            )
                     except Exception as e:
                         logger.error(f"[{NODE_ID}] Error processing Redis message: {e}")
         except asyncio.CancelledError:
@@ -552,6 +560,144 @@ class ConnectionManager:
 
             # Timer expired -> Auto-advance turn!
             await self.advance_turn(room_id, turn_index + 1)
+        except asyncio.CancelledError:
+            pass
+
+    async def broadcast_local_filtered(
+        self, room_id: str, data: dict, exclude_client_id: Optional[str] = None
+    ):
+        """Delivers WebSocket JSON message to local clients, filtering draw events
+        based on Blind-Chain Relay slice visibility."""
+        if not room_id:
+            return
+
+        target_room_key = None
+        for k in self.local_rooms.keys():
+            if k.upper() == room_id.upper():
+                target_room_key = k
+                break
+
+        if not target_room_key:
+            return
+
+        session = await self.get_game_session(room_id)
+        if not session or session.get("status") != "blind_chain_playing":
+            # Fallback to normal broadcast if no active blind chain session
+            await self.broadcast_local(room_id, data, exclude_client_id)
+            return
+
+        slices = session.get("slices", {})
+        canvas_height = session.get("canvas_height_px", 800)
+        disconnected = []
+
+        # Strip internal flag before sending to clients
+        send_data = {k: v for k, v in data.items() if k != "_blind_chain_filtered"}
+        message = json.dumps(send_data)
+
+        for cid, client in list(self.local_rooms[target_room_key].items()):
+            if exclude_client_id and cid == exclude_client_id:
+                continue
+
+            # Check if stroke is visible to this client's slice
+            client_slice_data = slices.get(cid)
+            if client_slice_data:
+                recipient_slice = (client_slice_data["start"], client_slice_data["end"])
+                if not BlindChainGame.should_relay_stroke(data, recipient_slice, canvas_height):
+                    continue
+
+            try:
+                await client["ws"].send_text(message)
+            except Exception as e:
+                logger.error(f"[{NODE_ID}] Error sending filtered to client {cid}: {e}")
+                disconnected.append(cid)
+
+        for cid in disconnected:
+            await self.disconnect(target_room_key, cid)
+
+    async def start_blind_chain(self, room_id: str, host_client_id: str, timer_seconds: int = 60, canvas_height_px: int = 800):
+        """Starts Blind Chain Relay game mode for the specified room."""
+        cluster_users = await self.get_active_users(room_id)
+        if not cluster_users:
+            if room_id in self.local_rooms and self.local_rooms[room_id]:
+                cluster_users = [
+                    {
+                        "client_id": cid,
+                        "name": info["name"],
+                        "color": info["color"],
+                        "role": info.get("role", "Editor"),
+                        "is_host": info.get("is_host", False)
+                    }
+                    for cid, info in self.local_rooms[room_id].items()
+                ]
+
+        if not cluster_users:
+            return
+
+        session = BlindChainGame.start_session(
+            room_id=room_id,
+            players=cluster_users,
+            host_client_id=host_client_id,
+            timer_seconds=timer_seconds,
+            canvas_height_px=canvas_height_px,
+        )
+        await self.save_game_session(room_id, session)
+
+        # Build per-client slice assignments for the start payload
+        session_to_save = {k: v for k, v in session.items() if k != "timer_task"}
+        start_payload = {
+            "type": "blind_chain_start",
+            "room_code": room_id,
+            "players": cluster_users,
+            "slices": session["slices"],
+            "timer_seconds": timer_seconds,
+            "canvas_height_px": canvas_height_px,
+            "game_session": session_to_save,
+        }
+        await self.publish_event(room_id, start_payload, exclude_client_id=None)
+
+        # Start countdown timer
+        session["timer_task"] = asyncio.create_task(
+            self.run_blind_chain_timer(room_id, timer_seconds)
+        )
+        self.game_sessions[room_id] = session
+
+    async def run_blind_chain_timer(self, room_id: str, seconds: int):
+        """Background countdown task for Blind Chain Relay. Broadcasts ticks and triggers reveal on expiry."""
+        try:
+            for remaining in range(seconds, -1, -1):
+                await asyncio.sleep(1)
+                session = await self.get_game_session(room_id)
+                if not session or session.get("status") != "blind_chain_playing":
+                    return
+
+                tick_payload = {
+                    "type": "blind_chain_tick",
+                    "time_left": remaining,
+                }
+                await self.publish_event(room_id, tick_payload, exclude_client_id=None)
+
+            # Timer expired -> Reveal!
+            session = await self.get_game_session(room_id)
+            if not session or session.get("status") != "blind_chain_playing":
+                return
+
+            session["status"] = "blind_chain_reveal"
+            if session.get("timer_task"):
+                session["timer_task"] = None
+            await self.save_game_session(room_id, session)
+
+            all_strokes = BlindChainGame.get_all_strokes(session)
+            session_to_save = {k: v for k, v in session.items() if k != "timer_task"}
+            reveal_payload = {
+                "type": "blind_chain_reveal",
+                "room_code": room_id,
+                "players": session["players"],
+                "slices": session["slices"],
+                "all_strokes": all_strokes,
+                "game_session": session_to_save,
+            }
+            await self.publish_event(room_id, reveal_payload, exclude_client_id=None)
+
         except asyncio.CancelledError:
             pass
 
@@ -921,15 +1067,27 @@ class ConnectionManager:
                 "users": user_list,
             }
             await self.publish_event(room_id, user_left_payload)
+        # Broadcast updated member list after leave
+        if room_manager:
+            members = await room_manager.get_members(room_id)
+            await self.publish_event(
+                room_id,
+                {"type": "member_list_update", "room_id": room_id, "members": members},
+                exclude_client_id=None
+            )
 
 
 manager = ConnectionManager()
+# Global RoomManager will be initialized after Redis is set up
+room_manager: Optional[RoomManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for Redis connection management."""
     await manager.init_redis()
+    global room_manager
+    room_manager = RoomManager(manager.redis)
     yield
     await manager.close_redis()
 
@@ -1012,11 +1170,49 @@ async def websocket_endpoint(
             data["client_id"] = client_id
 
             if action_type == "draw":
-                # Persist to Redis history & publish event to all nodes
-                await manager.add_history_action(room_id, data)
-                await manager.publish_event(
-                    room_id, data, exclude_client_id=client_id
-                )
+                # Check if Blind Chain Relay is active — use filtered broadcast
+                bc_session = await manager.get_game_session(room_id)
+                if bc_session and bc_session.get("status") == "blind_chain_playing":
+                    slices = bc_session.get("slices", {})
+                    canvas_h = bc_session.get("canvas_height_px", 800)
+                    sender_slice_data = slices.get(client_id)
+
+                    # Validate stroke is within sender's allowed zone
+                    if sender_slice_data:
+                        sender_slice = (sender_slice_data["start"], sender_slice_data["end"])
+                        if not BlindChainGame.is_stroke_in_sender_slice(data, sender_slice, canvas_h):
+                            logger.warning(f"[{NODE_ID}] Blind-chain: rejected out-of-zone stroke from {client_id}")
+                            continue
+
+                    # Buffer stroke for reveal
+                    if "all_strokes" not in bc_session:
+                        bc_session["all_strokes"] = []
+                    bc_session["all_strokes"].append(data)
+                    await manager.save_game_session(room_id, bc_session)
+
+                    # Persist to history and use filtered broadcast
+                    await manager.add_history_action(room_id, data)
+                    data["_blind_chain_filtered"] = True
+                    await manager.broadcast_local_filtered(room_id, data, exclude_client_id=client_id)
+
+                    # Publish to Redis for cross-node filtered delivery
+                    if manager.redis:
+                        payload = {
+                            "room_id": room_id,
+                            "sender_node": NODE_ID,
+                            "exclude_client_id": client_id,
+                            "data": data,
+                        }
+                        try:
+                            await manager.redis.publish(REDIS_CHANNEL, json.dumps(payload))
+                        except Exception as e:
+                            logger.error(f"[{NODE_ID}] Error publishing blind-chain draw: {e}")
+                else:
+                    # Standard collaborative draw — persist & broadcast normally
+                    await manager.add_history_action(room_id, data)
+                    await manager.publish_event(
+                        room_id, data, exclude_client_id=client_id
+                    )
 
             elif action_type == "cursor":
                 # Cursors are broadcast in real-time without history persistence
@@ -1095,17 +1291,35 @@ async def websocket_endpoint(
                     "is_host": True
                 }))
 
+            elif action_type == "toggle_ready":
+                # Update ready status via RoomManager
+                ready = data.get('ready', False)
+                if room_manager:
+                    await room_manager.set_ready(room_id, client_id, ready)
+                    members = await room_manager.get_members(room_id)
+                    await manager.publish_event(room_id, {"type": "member_list_update", "room_id": room_id, "members": members}, exclude_client_id=None)
+
             elif action_type == "start_session":
                 mode = data.get("mode", "whiteboard")
                 await manager.set_room_session_status(room_id, "in_progress")
                 logger.info(f"[{NODE_ID}] Received start_session for room '{room_id}' from client '{client_id}', mode={mode}")
-                payload = {
-                    "type": "start_session",
-                    "room_id": room_id,
-                    "started_by": client_id,
-                    "mode": mode
-                }
-                await manager.publish_event(room_id, payload, exclude_client_id=None)
+
+                if mode == "blind_chain":
+                    # Start Blind Chain Relay game mode
+                    timer_s = data.get("timer_seconds", BlindChainGame.DEFAULT_TIMER)
+                    canvas_h = data.get("canvas_height_px", 800)
+                    await manager.start_blind_chain(
+                        room_id, host_client_id=client_id,
+                        timer_seconds=timer_s, canvas_height_px=canvas_h
+                    )
+                else:
+                    payload = {
+                        "type": "start_session",
+                        "room_id": room_id,
+                        "started_by": client_id,
+                        "mode": mode
+                    }
+                    await manager.publish_event(room_id, payload, exclude_client_id=None)
 
             elif action_type == "update_room_permissions":
                 drawing_locked = data.get("drawing_locked", False)

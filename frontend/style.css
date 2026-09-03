@@ -2940,7 +2940,177 @@ body, html {
 }
 
 
+/* ==========================================================================
+   Blind Chain Relay — Fog Overlay, Timer HUD & Reveal Animation
+   ========================================================================== */
 
+.blind-chain-fog-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 8;
+    transition: opacity 1.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
 
+.blind-chain-fog-overlay.revealing {
+    opacity: 0 !important;
+}
+
+.blind-chain-fog-band {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    background: rgba(9, 13, 22, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    pointer-events: none;
+    transition: opacity 1.5s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.blind-chain-fog-band.revealing-up {
+    opacity: 0;
+    transform: translateY(-40px);
+}
+
+.blind-chain-fog-band.revealing-down {
+    opacity: 0;
+    transform: translateY(40px);
+}
+
+.blind-chain-seam-line {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: repeating-linear-gradient(
+        90deg,
+        rgba(99, 102, 241, 0.6) 0px,
+        rgba(99, 102, 241, 0.6) 8px,
+        transparent 8px,
+        transparent 16px
+    );
+    pointer-events: none;
+    z-index: 9;
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.3);
+}
+
+.blind-chain-zone-label {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 16px;
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: var(--radius-full);
+    color: var(--accent-primary);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    pointer-events: none;
+    z-index: 9;
+    white-space: nowrap;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+/* Timer HUD Bar */
+.blind-chain-timer-hud {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 24px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    border-radius: var(--radius-full);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    z-index: 50;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 20px rgba(99, 102, 241, 0.15);
+    animation: bcHudSlideIn 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes bcHudSlideIn {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+.bc-hud-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--accent-neon);
+}
+
+.bc-hud-separator {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+.bc-hud-hint {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.bc-timer-countdown {
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: var(--accent-pink);
+    font-variant-numeric: tabular-nums;
+    min-width: 50px;
+    text-align: center;
+    padding: 2px 10px;
+    background: rgba(236, 72, 153, 0.12);
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(236, 72, 153, 0.2);
+}
+
+.bc-timer-countdown.warning {
+    color: var(--status-warning);
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    animation: bcTimerPulse 0.8s ease-in-out infinite;
+}
+
+.bc-timer-countdown.critical {
+    color: var(--status-error);
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+    animation: bcTimerPulse 0.4s ease-in-out infinite;
+}
+
+@keyframes bcTimerPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(1.05); }
+}
+
+/* Fog lift keyframe animation */
+@keyframes fogLift {
+    0% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    60% {
+        opacity: 0.3;
+    }
+    100% {
+        opacity: 0;
+        transform: translateY(-30px);
+    }
+}
 
 
