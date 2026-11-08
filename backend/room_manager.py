@@ -12,12 +12,14 @@ class RoomManager:
 
     def __init__(self, redis_client):
         self.redis = redis_client
+        self.memory_meta = {}
+        self.memory_members = {}
 
     # ---------- Meta ----------
     async def get_meta(self, room_id: str) -> Dict[str, str]:
         key = f"room:{room_id}:meta"
         if not self.redis:
-            return {}
+            return dict(self.memory_meta.get(room_id, {}))
         try:
             raw = await self.redis.hgetall(key)
             # Decode bytes if needed
@@ -29,6 +31,7 @@ class RoomManager:
     async def set_meta_field(self, room_id: str, field: str, value: str) -> None:
         key = f"room:{room_id}:meta"
         if not self.redis:
+            self.memory_meta.setdefault(room_id, {})[field] = value
             return
         try:
             await self.redis.hset(key, field, value)
@@ -41,6 +44,7 @@ class RoomManager:
         member must contain at least 'client_id'.
         """
         if not self.redis:
+            self.memory_members.setdefault(room_id, {})[member["client_id"]] = dict(member)
             return
         key = f"users:{room_id}"
         client_id = member.get("client_id")
@@ -53,6 +57,7 @@ class RoomManager:
 
     async def remove_member(self, room_id: str, client_id: str) -> None:
         if not self.redis:
+            self.memory_members.get(room_id, {}).pop(client_id, None)
             return
         key = f"users:{room_id}"
         try:
@@ -63,7 +68,7 @@ class RoomManager:
     async def get_members(self, room_id: str) -> List[Dict]:
         key = f"users:{room_id}"
         if not self.redis:
-            return []
+            return [dict(member) for member in self.memory_members.get(room_id, {}).values()]
         try:
             raw = await self.redis.hgetall(key)
             members = []
