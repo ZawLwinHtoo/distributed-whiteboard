@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import string
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Set
@@ -37,6 +38,8 @@ class ConnectionManager:
     """Manages local WebSockets and Redis Pub/Sub multi-node broadcasting."""
 
     def __init__(self):
+        self.redis = None
+        self.pubsub_task = None
         # room_id -> { client_id -> { "ws": WebSocket, "name": str, "color": str } }
         self.local_rooms: Dict[str, Dict[str, dict]] = {}
         # Standalone in-memory fallback for drawing history when Redis is unavailable
@@ -119,6 +122,12 @@ class ConnectionManager:
 
     async def close_redis(self):
         """Cleanly cancels Pub/Sub background listener and closes Redis client."""
+        timers = [session.get("timer_task") for session in self.game_sessions.values()]
+        timers = [task for task in timers if isinstance(task, asyncio.Task)]
+        for task in timers:
+            task.cancel()
+        if timers:
+            await asyncio.gather(*timers, return_exceptions=True)
         if self.pubsub_task:
             self.pubsub_task.cancel()
             try:
@@ -293,6 +302,7 @@ class ConnectionManager:
                 return [json.loads(item) for item in raw_history]
             except Exception as e:
                 logger.error(f"[{NODE_ID}] Error fetching history from Redis: {e}")
+        return list(self.local_history.get(room_id, []))
         
     async def get_active_users(self, room_id: str) -> List[dict]:
         """Fetches active cluster users by merging local memory, cluster roster, and Redis hash."""
@@ -928,7 +938,7 @@ class ConnectionManager:
             }
             await websocket.send_text(json.dumps(reject_payload))
             await websocket.close(code=4001, reason="Session already in progress")
-            return
+            return False
 
         if room_id not in self.local_rooms:
             self.local_rooms[room_id] = {}
@@ -937,9 +947,10 @@ class ConnectionManager:
         existing_users = await self.get_active_users(room_id)
         has_host = any(u.get("is_host") or u.get("role") == "Host" for u in existing_users)
 
-        role = "Host" if not has_host else "Editor"
+        previous = next((user for user in existing_users if user.get("client_id") == client_id), None)
+        role = previous.get("role", "Editor") if previous else ("Host" if not has_host else "Editor")
         is_host = (role == "Host")
-        can_draw = True
+        can_draw = previous.get("can_draw", True) if previous else True
 
         self.local_rooms[room_id][client_id] = {
             "ws": websocket,
@@ -1012,11 +1023,19 @@ class ConnectionManager:
         await self.publish_event(
             room_id, user_joined_payload, exclude_client_id=client_id
         )
+        if room_manager:
+            await room_manager.add_member(room_id, {**user_info, "is_ready": False})
+        return True
 
-    async def disconnect(self, room_id: str, client_id: str):
+    async def disconnect(self, room_id: str, client_id: str, websocket=None):
         """Handles client disconnection and updates cluster roster with host auto-promotion."""
+        current = self.local_rooms.get(room_id, {}).get(client_id)
+        if websocket is not None and current and current.get("ws") is not websocket:
+            return
         if room_id in self.local_rooms and client_id in self.local_rooms[room_id]:
             user_info = self.local_rooms[room_id].pop(client_id)
+            if room_manager:
+                await room_manager.remove_member(room_id, client_id)
             if not self.local_rooms[room_id]:
                 del self.local_rooms[room_id]
 
@@ -1158,16 +1177,52 @@ async def websocket_endpoint(
     color: str = Query("#6366f1"),
 ):
     """WebSocket endpoint supporting real-time cross-node Pub/Sub collaboration."""
-    await manager.connect(websocket, room_id, client_id, name, color)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", room_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", client_id):
+        await websocket.close(code=1008)
+        return
+    name = name.strip()[:50] or "Anonymous"
+    color = color if re.fullmatch(r"#[0-9a-fA-F]{6}", color) else "#6366f1"
+    if not await manager.connect(websocket, room_id, client_id, name, color):
+        return
 
     try:
         while True:
             raw_data = await websocket.receive_text()
-            data = json.loads(raw_data)
+            if len(raw_data) > 256_000:
+                continue
+            try:
+                data = json.loads(raw_data)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
             action_type = data.get("type")
 
             # Enrich message with client provenance
             data["client_id"] = client_id
+            data["name"] = name
+            data["color"] = color
+            users = await manager.get_active_users(room_id)
+            actor = next((user for user in users if user.get("client_id") == client_id), None)
+            if not actor:
+                continue
+            host_actions = {"start_session", "start_game", "start_voting", "update_room_permissions", "update_lobby_settings"}
+            if action_type in host_actions and not (actor.get("is_host") or actor.get("role") == "Host"):
+                await websocket.send_json({"type": "error", "message": "Only the host can change session controls."})
+                continue
+            drawing_actions = {"draw", "clear", "undo", "sticky_create", "sticky_update", "sticky_delete", "ai_diagram", "game_draw", "game_undo", "game_clear"}
+            if action_type in drawing_actions and not actor.get("can_draw", True):
+                await websocket.send_json({"type": "error", "message": "Drawing is locked for this participant."})
+                continue
+            if action_type in {"game_draw", "game_undo", "game_clear", "finish_turn"}:
+                session = await manager.get_game_session(room_id)
+                if not session or session.get("status") != "playing":
+                    continue
+                players = session.get("players", [])
+                index = session.get("current_turn_index", 0)
+                if not 0 <= index < len(players) or players[index].get("client_id") != client_id:
+                    await websocket.send_json({"type": "error", "message": "Only the current drawer can change this turn."})
+                    continue
 
             if action_type == "draw":
                 # Check if Blind Chain Relay is active — use filtered broadcast
@@ -1324,17 +1379,22 @@ async def websocket_endpoint(
             elif action_type == "update_room_permissions":
                 drawing_locked = data.get("drawing_locked", False)
                 user_roles = data.get("user_roles", {})  # { cid: "Editor" | "Viewer" }
+                if not isinstance(user_roles, dict):
+                    continue
                 logger.info(f"[{NODE_ID}] Received update_room_permissions for room '{room_id}': locked={drawing_locked}")
                 users = await manager.get_active_users(room_id)
                 for u in users:
                     cid = u["client_id"]
                     if not (u.get("is_host") or u.get("role") == "Host"):
                         if cid in user_roles:
-                            u["role"] = user_roles[cid]
-                            u["can_draw"] = (user_roles[cid] == "Editor")
+                            u["role"] = user_roles[cid] if user_roles[cid] in {"Editor", "Viewer"} else "Viewer"
+                            u["can_draw"] = (u["role"] == "Editor")
                         else:
                             u["can_draw"] = not drawing_locked
                             u["role"] = "Viewer" if drawing_locked else "Editor"
+                    manager.cluster_user_rosters.setdefault(room_id, {})[cid] = u
+                    if cid in manager.local_rooms.get(room_id, {}):
+                        manager.local_rooms[room_id][cid].update({key: u[key] for key in ("role", "can_draw")})
                     if manager.redis:
                         try:
                             await manager.redis.hset(f"users:{room_id}", cid, json.dumps(u))
@@ -1439,10 +1499,10 @@ async def websocket_endpoint(
 
 
     except WebSocketDisconnect:
-        await manager.disconnect(room_id, client_id)
+        await manager.disconnect(room_id, client_id, websocket)
     except Exception as e:
         logger.error(f"[{NODE_ID}] WebSocket error for client {client_id}: {e}")
-        await manager.disconnect(room_id, client_id)
+        await manager.disconnect(room_id, client_id, websocket)
 
 
 # Serve static frontend files

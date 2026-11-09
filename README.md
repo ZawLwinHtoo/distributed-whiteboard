@@ -1,3 +1,26 @@
+# Distributed Whiteboard
+
+Collaborative canvas and Blind Chain Draw party game built with FastAPI, WebSockets and optional Redis.
+
+## Verified local setup
+
+```sh
+python -m venv .venv
+# Activate the environment, then:
+python -m pip install -r requirements-dev.txt
+python -m uvicorn backend.server:app --host 127.0.0.1 --port 8000
+```
+
+Open http://127.0.0.1:8000 in two browser tabs with different identities. Create/join the same room, then use the host's Launch Session control. Without Redis, room history, participants, ready states and permissions work within one process and reset when it stops. Run `docker compose up --build --wait` for two nodes and real Redis, then open http://127.0.0.1:8092. For other multi-process setups, configure a real Redis server; the embedded broker is a development convenience. Room IDs and display names are public session identities, not authenticated accounts. Do not expose this demo as a trusted access-control system.
+
+```sh
+python -m pytest -q
+```
+
+Recovery checks exercise history replay, room isolation, host permissions, ready state, malformed messages and late-join rejection using real WebSocket sessions.
+
+---
+
 # CollabDraw 🎨
 
 > **Distributed Real-Time Whiteboard & Blind Chain Draw Party Game**  
@@ -118,7 +141,7 @@ Access the application unified gateway at **[http://localhost](http://localhost)
 
 #### Step 1: Clone Repository & Setup Virtual Environment
 ```bash
-git clone https://github.com/your-username/distributed-whiteboard.git
+git clone https://github.com/ZawLwinHtoo/distributed-whiteboard.git
 cd distributed-whiteboard
 python -m venv .venv
 # On Windows:

@@ -5,6 +5,8 @@
 (function () {
     'use strict';
 
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+
     // ==========================================================================
     // State Initialization & Configuration
     // ==========================================================================
@@ -1408,7 +1410,7 @@
                 activeUsers = msg.users || [];
                 updateUserStack();
                 updateLobbyView();
-                showToast(`${msg.name} joined the room`);
+                showToast(`${escapeHtml(msg.name)} joined the room`);
                 break;
 
             case 'user_left':
@@ -1416,7 +1418,7 @@
                 removeRemoteCursor(msg.client_id);
                 updateUserStack();
                 updateLobbyView();
-                showToast(`${msg.name} left the room`);
+                showToast(`${escapeHtml(msg.name)} left the room`);
                 break;
 
             case 'start_session':
@@ -1437,8 +1439,8 @@
                 const isHostUser = Boolean(isHost || (sessionStorage.getItem('collabdraw_host_' + roomId) === 'true'));
                 const reqKind = msg.request_kind || 'next_round';
                 const msgText = (reqKind === 'voting')
-                    ? `🏆 ${msg.name} requested you to start Voting!`
-                    : `🚀 ${msg.name} requested you to start Next Round!`;
+                    ? `🏆 ${escapeHtml(msg.name)} requested you to start Voting!`
+                    : `🚀 ${escapeHtml(msg.name)} requested you to start Next Round!`;
 
                 showToast(msgText);
 
@@ -1447,13 +1449,13 @@
                         const proceedBtn = document.getElementById('proceedToVotingBtn');
                         if (proceedBtn) {
                             proceedBtn.style.boxShadow = '0 0 20px #f59e0b';
-                            proceedBtn.innerHTML = `<span>Proceed to Voting 🏆 (Requested by ${msg.name})</span>`;
+                            proceedBtn.innerHTML = `<span>Proceed to Voting 🏆 (Requested by ${escapeHtml(msg.name)})</span>`;
                         }
                     } else {
                         const playAgainBtn = document.getElementById('ceremonyPlayAgainBtn');
                         if (playAgainBtn) {
                             playAgainBtn.style.boxShadow = '0 0 20px #ec4899';
-                            playAgainBtn.innerHTML = `<span>Play Next Round 🔄 (Requested by ${msg.name})</span>`;
+                            playAgainBtn.innerHTML = `<span>Play Next Round 🔄 (Requested by ${escapeHtml(msg.name)})</span>`;
                         }
                     }
                 }
@@ -1866,7 +1868,7 @@
                 <svg viewBox="0 0 24 24" fill="none">
                     <path d="M5.65376 12.3673H5.46026L5.31717 12.4976L0.500002 16.8829L0.500002 1.19841L17.7841 12.3673H5.65376Z" fill="${color}" stroke="#ffffff" stroke-width="1.2"/>
                 </svg>
-                <div class="remote-cursor-label" style="background-color: ${color};">${name}</div>
+                <div class="remote-cursor-label" style="background-color: ${color};">${escapeHtml(name)}</div>
             `;
             cursorOverlay.appendChild(cursorEl);
             remoteCursors.set(cid, cursorEl);
@@ -2379,7 +2381,7 @@
             const badge = document.createElement('div');
             badge.className = 'contributor-badge';
             badge.style.color = p.color || '#38bdf8';
-            badge.textContent = `Layer ${idx + 1}: ${p.name}`;
+            badge.textContent = `Layer ${idx + 1}: ${escapeHtml(p.name)}`;
             revealContributors.appendChild(badge);
         });
 
@@ -2489,9 +2491,9 @@
 
             card.innerHTML = `
                 <div class="voter-avatar" style="background-color: ${p.color || '#38bdf8'};">
-                    ${p.name.charAt(0).toUpperCase()}
+                    ${escapeHtml(p.name.charAt(0).toUpperCase())}
                 </div>
-                <div class="voter-name">${p.name}</div>
+                <div class="voter-name">${escapeHtml(p.name)}</div>
                 ${isSelf ? '<div class="voter-badge-disabled">Self (No Vote)</div>' : ''}
             `;
 
@@ -2645,9 +2647,9 @@
                 card.innerHTML = `
                     <div class="winner-category-tag">${icon} ${title}</div>
                     <div class="voter-avatar" style="background-color: ${p.color || '#38bdf8'}; width: 44px; height: 44px; font-size: 18px;">
-                        ${(p.name || 'P').charAt(0).toUpperCase()}
+                        ${escapeHtml((p.name || 'P').charAt(0).toUpperCase())}
                     </div>
-                    <div class="winner-name-display">${p.name || 'Player'}</div>
+                    <div class="winner-name-display">${escapeHtml(p.name || 'Player')}</div>
                     <div class="winner-votes-count">${winData.votes || 0} Votes</div>
                 `;
                 return card;
@@ -2665,14 +2667,14 @@
                 const b = document.createElement('div');
                 b.className = 'award-pin-badge';
                 b.style.color = '#fbbf24';
-                b.innerHTML = `🎨 Most Creative: <strong>${winners.best_creative.player.name}</strong>`;
+                b.innerHTML = `🎨 Most Creative: <strong>${escapeHtml(winners.best_creative.player.name)}</strong>`;
                 ceremonyAwardBadges.appendChild(b);
             }
             if (winners.most_chaotic && winners.most_chaotic.player) {
                 const b = document.createElement('div');
                 b.className = 'award-pin-badge';
                 b.style.color = '#f43f5e';
-                b.innerHTML = `🤡 Most Chaotic: <strong>${winners.most_chaotic.player.name}</strong>`;
+                b.innerHTML = `🤡 Most Chaotic: <strong>${escapeHtml(winners.most_chaotic.player.name)}</strong>`;
                 ceremonyAwardBadges.appendChild(b);
             }
         }
@@ -3287,9 +3289,9 @@
             card.className = 'lobby-player-card';
             card.innerHTML = `
                 <div class="lobby-player-avatar" style="background-color: ${u.color || '#38bdf8'};">
-                    ${(u.name || 'U').charAt(0).toUpperCase()}
+                    ${escapeHtml((u.name || 'U').charAt(0).toUpperCase())}
                 </div>
-                <div class="lobby-player-name">${u.name || 'User'}</div>
+                <div class="lobby-player-name">${escapeHtml(u.name || 'User')}</div>
                 <span class="role-badge ${roleClass}">${isRoomHost ? '👑 Host' : roleName}</span>
             `;
             lobbyPlayersGrid.appendChild(card);
